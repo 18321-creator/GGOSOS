@@ -169,7 +169,7 @@ while ($true)
 
         Write-Host ""
 
-        Write-Console "CLEAN SUCCESS" "SUCCESS"
+        Write-Console "CLEAN SUCCESS" "SUCCES"
 
         Write-Host ""
         Pause
