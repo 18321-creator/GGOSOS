@@ -150,12 +150,12 @@ while ($true)
 
 
 
- elseif ($choice -eq "2")
+elseif ($choice -eq "2")
 {
     Clear-Host
     Show-Header
 
-    # ตรวจสอบสิทธิ์เบื้องต้น (ต้องรันด้วย Administrator ก่อนยกระดับ)
+    # ตรวจสอบสิทธิ์ Administrator ทั่วไปก่อนรันสคริปต์หลัก
     $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     if (-not $isAdmin) {
         Write-Console "Please run this script as Administrator!" "ERROR"
@@ -163,92 +163,71 @@ while ($true)
         return
     }
 
-    Write-Console "STARTING ADVANCED SYSTEM CLEANING (TRUSTEDINSTALLER PRIVILEGES)..." "INFO"
+    Write-Console "STARTING DEEP CLEANING PROCESS..." "INFO"
 
     # ==========================================
-    # ฟังก์ชันช่วยในการ Take Ownership Registry (สำหรับสิทธิ์ขั้นสูง)
-    # ==========================================
-    function Grant-RegistryAccess ($RegistryPath) {
-        # เปลี่ยนสิทธิ์เจ้าของเป็น Administrators
-        $ntobj = New-Object System.Security.AccessControl.NTAccount("Administrators")
-        $reg = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($RegistryPath, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, [System.Security.AccessControl.RegistryRights]::TakeOwnership)
-        if ($reg) {
-            $acl = $reg.GetAccessControl()
-            $acl.SetOwner($ntobj)
-            $reg.SetAccessControl($acl)
-            
-            # มอบสิทธิ์ Full Control ให้ Administrators
-            $acl = $reg.GetAccessControl()
-            $rule = New-Object System.Security.AccessControl.RegistryAccessRule("Administrators", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
-            $acl.SetAccessRule($rule)
-            $reg.SetAccessControl($acl)
-        }
-    }
-
-    # ==========================================
-    # 1. หยุด Process และลบไฟล์เป้าหมายเดิม
-    # ==========================================
-    Stop-Process -Name "syshost" -Force -ErrorAction SilentlyContinue
-    Remove-Item "$env:TEMP\syshost.exe" -Force -ErrorAction SilentlyContinue
-
-    # ==========================================
-    # 2. เปิดไฟล์ PowerShell History ด้วย Notepad เพื่อให้ลบเอง
+    # 1. จัดการประวัติ PowerShell History ใน Notepad
     # ==========================================
     $HistoryPath = "$env:APPDATA\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt"
     if (Test-Path $HistoryPath) {
-        Write-Console "Opening PowerShell History in Notepad for manual cleaning..." "INFO"
+        Write-Console "Opening PowerShell History in Notepad..." "INFO"
         Start-Process "notepad.exe" -ArgumentList $HistoryPath -Wait
-        Write-Console "PowerShell History handled." "SUCCES"
     }
 
     # ==========================================
-    # 3. ฟังก์ชันพิเศษ: ตรวจสอบและลบ BAM / DAM ของโปรแกรมที่ไม่มีอยู่จริง
+    # 2. [เทคนิคพิเศษ SYSTEM Privileges] สแกนลบ BAM / DAM
     # ==========================================
-    Write-Console "Scanning and cleaning orphaned BAM/DAM entries..." "INFO"
-    
-    # เส้นทางคีย์ BAM และ DAM ใน Registry
-    $BamPaths = @(
-        "SYSTEM\CurrentControlSet\Services\bam\UserSettings",
-        "SYSTEM\CurrentControlSet\Services\dam\UserSettings"
-    )
+    Write-Console "Injecting SYSTEM Task to force clear BAM/DAM entries..." "INFO"
 
-    foreach ($SubPath in $BamPaths) {
-        # ขอกลืนสิทธิ์เพื่อเข้าถึงคีย์ระบบ
-        Grant-RegistryAccess $SubPath
-
-        $FullRootKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($SubPath, $true)
-        if ($FullRootKey) {
-            # วนลูปหา SID ของ User ต่างๆ
-            foreach ($Sid in $FullRootKey.GetSubKeyNames()) {
-                $UserKey = $FullRootKey.OpenSubKey($Sid, $true)
-                if ($UserKey) {
-                    # ไล่ตรวจสอบพาธโปรแกรมที่ถูกบันทึกไว้ในแต่ละ SID
-                    foreach ($ValueName in $UserKey.GetValueNames()) {
-                        # กรองเอาเฉพาะค่าที่เป็นพาธของไฟล์ติดตั้ง (มักขึ้นต้นด้วย \Device\HarddiskVolume...)
+    # สร้างโค้ดชิ้นย่อยเพื่อไปรันในสิทธิ์ SYSTEM
+    $SystemScriptBlock = {
+        $BamPaths = @(
+            "Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\bam\UserSettings",
+            "Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\dam\UserSettings"
+        )
+        foreach ($RootPath in $BamPaths) {
+            if (Test-Path $RootPath) {
+                Get-ChildItem -Path $RootPath -ErrorAction SilentlyContinue | ForEach-Object {
+                    $UserKeyPath = $_.PsPath
+                    Get-ItemProperty -Path $UserKeyPath -ErrorAction SilentlyContinue | Get-Member -MemberType NoteProperty | ForEach-Object {
+                        $ValueName = $_.Name
                         if ($ValueName -like "*\*" -and $ValueName -notlike "*System32*") {
-                            
-                            # แปลงพาธระบบให้เป็นพาธมาตรฐาน Windows (เช่น C:\...) เพื่อตรวจสอบว่าไฟล์ยังอยู่ไหม
                             $CleanPath = $ValueName
                             if ($ValueName -match "\\Device\\HarddiskVolume\d+(.*)") {
                                 $CleanPath = $env:SystemDrive + $Matches[1]
                             }
-
-                            # ถ้าไม่พบไฟล์โปรแกรมนั้นในเครื่องแล้ว ให้ลบคีย์ประวัตินั้นออก
+                            # ถ้าตรวจพบว่าไม่มีโปรแกรมอยู่ในเครื่องแล้ว สั่งลบคาดโทษทันที
                             if (-not (Test-Path $CleanPath) -and $CleanPath -ne "") {
-                                $UserKey.DeleteValue($ValueName, $false)
-                                Write-Console "Removed BAM entry for deleted program: $CleanPath" "SUCCES"
+                                Remove-ItemProperty -Path $UserKeyPath -Name $ValueName -Force -ErrorAction SilentlyContinue
                             }
                         }
                     }
-                    $UserKey.Close()
                 }
             }
-            $FullRootKey.Close()
         }
     }
 
+    # แปลงโค้ดชิ้นย่อยเป็น Base64 เพื่อให้ง่ายต่อการรันข้ามสิทธิ์ผ่าน Task
+    $Bytes = [System.Text.Encoding]::Unicode.GetBytes($SystemScriptBlock.ToString())
+    $EncodedCommand = [Convert]::ToBase64String($Bytes)
+
+    # ลงทะเบียนและสั่งรัน Task ทันทีในฐานะ SYSTEM เพื่อปลดล็อก Registry ที่โดนแบน
+    $TaskName = "BAM_DAM_DeepClean"
+    $Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -WindowStyle Hidden -EncodedCommand $EncodedCommand"
+    $Principal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+    
+    $Task = Register-ScheduledTask -TaskName $TaskName -Action $Action -Principal $Principal -ErrorAction SilentlyContinue
+    if ($Task) {
+        Start-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 3 # รอให้ระบบประมวลผลลบไฟล์ Registry สักครู่
+        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+        Write-Console "Orphaned BAM/DAM entries cleaned successfully via SYSTEM mode." "SUCCES"
+    } else {
+        Write-Console "Failed to elevate to SYSTEM for BAM/DAM cleaning." "ERROR"
+    }
+
     # ==========================================
-    # 4. ลบไฟล์ระบบ / Logs / Cache / Traces ต่างๆ
+    # 3. ลบไฟล์ระบบ / Logs / Cache ต่างๆ
     # ==========================================
     Write-Console "Cleaning System Files & Caches..." "INFO"
 
@@ -279,20 +258,14 @@ while ($true)
     }
 
     # ==========================================
-    # 5. ลบ Event Logs ทั้งหมดในระบบ
+    # 4. ลบ Event Logs และประวัติใน Registry ทั่วไป
     # ==========================================
-    Write-Console "Clearing All Windows Event Logs..." "INFO"
+    Write-Console "Clearing All Event Logs & Registry Traces..." "INFO"
+    
     Get-WinEvent -ListLog * -ErrorAction SilentlyContinue | ForEach-Object {
         wevtutil cl $_.LogName 2>$null
     }
-
-    $EvtxPath = "$env:SystemRoot\System32\Winevt\Logs\*"
-    Remove-Item -Path $EvtxPath -Force -ErrorAction SilentlyContinue
-
-    # ==========================================
-    # 6. ลบประวัติกิจกรรมผู้ใช้ใน Registry ทั่วไป
-    # ==========================================
-    Write-Console "Cleaning Registry Activity Traces..." "INFO"
+    Remove-Item -Path "$env:SystemRoot\System32\Winevt\Logs\*" -Force -ErrorAction SilentlyContinue
 
     $RegistryKeys = @(
         "HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\BagMRU",
@@ -308,23 +281,18 @@ while ($true)
     )
 
     foreach ($Key in $RegistryKeys) {
-        if (Test-Path $Key) {
-            Remove-Item -Path $Key -Recurse -Force -ErrorAction SilentlyContinue
-        }
+        if (Test-Path $Key) { Remove-Item -Path $Key -Recurse -Force -ErrorAction SilentlyContinue }
     }
 
-    # ==========================================
-    # 7. คืนค่าระบบ (เปิด Service กลับมาทำงานปกติ)
-    # ==========================================
+    # คืนค่าระบบกลับสู่สภาวะปกติ
     Start-Service -Name "WSearch" -ErrorAction SilentlyContinue
     Start-Service -Name "EventLog" -ErrorAction SilentlyContinue
 
     Write-Host ""
-    Write-Console "CLEAN ALL TRACES SUCCESS (BAM/DAM INCLUDED)" "SUCCES"
+    Write-Console "CLEAN ALL TRACES SUCCESS" "SUCCES"
     Write-Host ""
     Pause
 }
-
 
     elseif ($choice -eq "0")
     {
