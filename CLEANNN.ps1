@@ -150,12 +150,40 @@ while ($true)
 
 
 
-  elseif ($choice -eq "2")
+ elseif ($choice -eq "2")
 {
     Clear-Host
     Show-Header
 
-    Write-Console "CLEANING SYSTEM & FORENSICS TRACES..." "INFO"
+    # ตรวจสอบสิทธิ์เบื้องต้น (ต้องรันด้วย Administrator ก่อนยกระดับ)
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if (-not $isAdmin) {
+        Write-Console "Please run this script as Administrator!" "ERROR"
+        Pause
+        return
+    }
+
+    Write-Console "STARTING ADVANCED SYSTEM CLEANING (TRUSTEDINSTALLER PRIVILEGES)..." "INFO"
+
+    # ==========================================
+    # ฟังก์ชันช่วยในการ Take Ownership Registry (สำหรับสิทธิ์ขั้นสูง)
+    # ==========================================
+    function Grant-RegistryAccess ($RegistryPath) {
+        # เปลี่ยนสิทธิ์เจ้าของเป็น Administrators
+        $ntobj = New-Object System.Security.AccessControl.NTAccount("Administrators")
+        $reg = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($RegistryPath, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, [System.Security.AccessControl.RegistryRights]::TakeOwnership)
+        if ($reg) {
+            $acl = $reg.GetAccessControl()
+            $acl.SetOwner($ntobj)
+            $reg.SetAccessControl($acl)
+            
+            # มอบสิทธิ์ Full Control ให้ Administrators
+            $acl = $reg.GetAccessControl()
+            $rule = New-Object System.Security.AccessControl.RegistryAccessRule("Administrators", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+            $acl.SetAccessRule($rule)
+            $reg.SetAccessControl($acl)
+        }
+    }
 
     # ==========================================
     # 1. หยุด Process และลบไฟล์เป้าหมายเดิม
@@ -167,26 +195,66 @@ while ($true)
     # 2. เปิดไฟล์ PowerShell History ด้วย Notepad เพื่อให้ลบเอง
     # ==========================================
     $HistoryPath = "$env:APPDATA\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt"
-
     if (Test-Path $HistoryPath) {
         Write-Console "Opening PowerShell History in Notepad for manual cleaning..." "INFO"
-        # สั่งเปิด Notepad ขึ้นมาแสดงไฟล์ประวัติทันที และรอให้จัดการเสร็จค่อยไปขั้นตอนต่อไป
         Start-Process "notepad.exe" -ArgumentList $HistoryPath -Wait
         Write-Console "PowerShell History handled." "SUCCES"
-    } else {
-        Write-Console "PowerShell History file not found." "INFO"
     }
 
     # ==========================================
-    # 3. ลบไฟล์ระบบ / Logs / Cache / Traces ต่างๆ
+    # 3. ฟังก์ชันพิเศษ: ตรวจสอบและลบ BAM / DAM ของโปรแกรมที่ไม่มีอยู่จริง
+    # ==========================================
+    Write-Console "Scanning and cleaning orphaned BAM/DAM entries..." "INFO"
+    
+    # เส้นทางคีย์ BAM และ DAM ใน Registry
+    $BamPaths = @(
+        "SYSTEM\CurrentControlSet\Services\bam\UserSettings",
+        "SYSTEM\CurrentControlSet\Services\dam\UserSettings"
+    )
+
+    foreach ($SubPath in $BamPaths) {
+        # ขอกลืนสิทธิ์เพื่อเข้าถึงคีย์ระบบ
+        Grant-RegistryAccess $SubPath
+
+        $FullRootKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($SubPath, $true)
+        if ($FullRootKey) {
+            # วนลูปหา SID ของ User ต่างๆ
+            foreach ($Sid in $FullRootKey.GetSubKeyNames()) {
+                $UserKey = $FullRootKey.OpenSubKey($Sid, $true)
+                if ($UserKey) {
+                    # ไล่ตรวจสอบพาธโปรแกรมที่ถูกบันทึกไว้ในแต่ละ SID
+                    foreach ($ValueName in $UserKey.GetValueNames()) {
+                        # กรองเอาเฉพาะค่าที่เป็นพาธของไฟล์ติดตั้ง (มักขึ้นต้นด้วย \Device\HarddiskVolume...)
+                        if ($ValueName -like "*\*" -and $ValueName -notlike "*System32*") {
+                            
+                            # แปลงพาธระบบให้เป็นพาธมาตรฐาน Windows (เช่น C:\...) เพื่อตรวจสอบว่าไฟล์ยังอยู่ไหม
+                            $CleanPath = $ValueName
+                            if ($ValueName -match "\\Device\\HarddiskVolume\d+(.*)") {
+                                $CleanPath = $env:SystemDrive + $Matches[1]
+                            }
+
+                            # ถ้าไม่พบไฟล์โปรแกรมนั้นในเครื่องแล้ว ให้ลบคีย์ประวัตินั้นออก
+                            if (-not (Test-Path $CleanPath) -and $CleanPath -ne "") {
+                                $UserKey.DeleteValue($ValueName, $false)
+                                Write-Console "Removed BAM entry for deleted program: $CleanPath" "SUCCES"
+                            }
+                        }
+                    }
+                    $UserKey.Close()
+                }
+            }
+            $FullRootKey.Close()
+        }
+    }
+
+    # ==========================================
+    # 4. ลบไฟล์ระบบ / Logs / Cache / Traces ต่างๆ
     # ==========================================
     Write-Console "Cleaning System Files & Caches..." "INFO"
 
-    # หยุด Service ที่ล็อกไฟล์ไว้ชั่วคราว เพื่อให้ระบบสามารถลบไฟล์ได้
     Stop-Service -Name "WSearch" -Force -ErrorAction SilentlyContinue 
     Stop-Service -Name "EventLog" -Force -ErrorAction SilentlyContinue
 
-    # รายการโฟลเดอร์และไฟล์ขยะ/ร่องรอยในระบบ
     $TargetPaths = @(
         "$env:TEMP\*",
         "$env:SystemRoot\Temp\*",
@@ -211,21 +279,18 @@ while ($true)
     }
 
     # ==========================================
-    # 4. ลบ Event Logs ทั้งหมดในระบบ
+    # 5. ลบ Event Logs ทั้งหมดในระบบ
     # ==========================================
     Write-Console "Clearing All Windows Event Logs..." "INFO"
-    
-    # ลบผ่านคำสั่ง wevtutil (วิธีมาตรฐาน)
     Get-WinEvent -ListLog * -ErrorAction SilentlyContinue | ForEach-Object {
         wevtutil cl $_.LogName 2>$null
     }
 
-    # ลบไฟล์ .evtx โดยตรงในโฟลเดอร์ Logs
     $EvtxPath = "$env:SystemRoot\System32\Winevt\Logs\*"
     Remove-Item -Path $EvtxPath -Force -ErrorAction SilentlyContinue
 
     # ==========================================
-    # 5. ลบประวัติกิจกรรมผู้ใช้ใน Registry
+    # 6. ลบประวัติกิจกรรมผู้ใช้ใน Registry ทั่วไป
     # ==========================================
     Write-Console "Cleaning Registry Activity Traces..." "INFO"
 
@@ -249,17 +314,16 @@ while ($true)
     }
 
     # ==========================================
-    # 6. คืนค่าระบบ (เปิด Service กลับมาทำงานปกติ)
+    # 7. คืนค่าระบบ (เปิด Service กลับมาทำงานปกติ)
     # ==========================================
     Start-Service -Name "WSearch" -ErrorAction SilentlyContinue
     Start-Service -Name "EventLog" -ErrorAction SilentlyContinue
 
     Write-Host ""
-    Write-Console "CLEAN ALL TRACES SUCCESS" "SUCCES"
+    Write-Console "CLEAN ALL TRACES SUCCESS (BAM/DAM INCLUDED)" "SUCCES"
     Write-Host ""
     Pause
 }
-
 
 
     elseif ($choice -eq "0")
